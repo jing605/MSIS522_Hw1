@@ -1,184 +1,403 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import joblib
+import shap
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    roc_curve,
+)
+
 st.set_page_config(page_title="Titanic Survival Prediction", layout="wide")
 
-st.title("Titanic Survival Prediction – MSIS 522 HW1")
 
-# Load dataset
-df = pd.read_csv("Titanic-Dataset.csv")
+# -----------------------------
+# Helpers
+# -----------------------------
+@st.cache_data
+def load_raw_data():
+    return pd.read_csv("Titanic-Dataset.csv")
 
-# Tabs
-tab1, tab2, tab3, tab4 = st.tabs([
-    "Executive Summary",
-    "Descriptive Analytics",
-    "Model Performance",
-    "Interactive Prediction"
-])
 
-# ---------------------------------------------------
-# TAB 1
-# ---------------------------------------------------
+@st.cache_data
+def preprocess_data(df: pd.DataFrame):
+    df_model = df.copy()
 
+    df_model["Age"] = df_model["Age"].fillna(df_model["Age"].median())
+    df_model["Embarked"] = df_model["Embarked"].fillna(df_model["Embarked"].mode()[0])
+
+    df_model.drop(
+        columns=["PassengerId", "Name", "Ticket", "Cabin"],
+        errors="ignore",
+        inplace=True,
+    )
+
+    df_model = pd.get_dummies(df_model, drop_first=True)
+
+    X = df_model.drop("Survived", axis=1)
+    y = df_model["Survived"]
+
+    return df_model, X, y
+
+
+@st.cache_resource
+def load_models():
+    models = {
+        "Logistic Regression": joblib.load("logistic_model.pkl"),
+        "Decision Tree": joblib.load("decision_tree_model.pkl"),
+        "Random Forest": joblib.load("random_forest_model.pkl"),
+        "XGBoost": joblib.load("xgboost_model.pkl"),
+        "Neural Network (MLP)": joblib.load("mlp_model.pkl"),
+    }
+    return models
+
+
+@st.cache_data
+def split_data(X, y):
+    return train_test_split(X, y, test_size=0.3, random_state=42)
+
+
+@st.cache_data
+def evaluate_models(_models, X_test, y_test):
+    rows = []
+    roc_dict = {}
+
+    for model_name, model in _models.items():
+        y_pred = model.predict(X_test)
+
+        if hasattr(model, "predict_proba"):
+            y_prob = model.predict_proba(X_test)[:, 1]
+            auc = roc_auc_score(y_test, y_prob)
+            fpr, tpr, _ = roc_curve(y_test, y_prob)
+            roc_dict[model_name] = (fpr, tpr, auc)
+        else:
+            y_prob = None
+            auc = np.nan
+
+        rows.append(
+            {
+                "Model": model_name,
+                "Accuracy": accuracy_score(y_test, y_pred),
+                "Precision": precision_score(y_test, y_pred, zero_division=0),
+                "Recall": recall_score(y_test, y_pred, zero_division=0),
+                "F1": f1_score(y_test, y_pred, zero_division=0),
+                "AUC": auc,
+            }
+        )
+
+    results_df = pd.DataFrame(rows).sort_values(by="F1", ascending=False).reset_index(drop=True)
+    return results_df, roc_dict
+
+
+def build_input_df(
+    X_columns,
+    pclass,
+    age,
+    sibsp,
+    parch,
+    fare,
+    sex,
+    embarked,
+):
+    input_dict = {col: 0 for col in X_columns}
+
+    # numeric columns
+    if "Pclass" in input_dict:
+        input_dict["Pclass"] = pclass
+    if "Age" in input_dict:
+        input_dict["Age"] = age
+    if "SibSp" in input_dict:
+        input_dict["SibSp"] = sibsp
+    if "Parch" in input_dict:
+        input_dict["Parch"] = parch
+    if "Fare" in input_dict:
+        input_dict["Fare"] = fare
+
+    # encoded columns from get_dummies(drop_first=True)
+    # Sex -> likely only Sex_male
+    if "Sex_male" in input_dict:
+        input_dict["Sex_male"] = 1 if sex == "male" else 0
+
+    # Embarked -> likely Embarked_Q and Embarked_S, with C as baseline
+    if "Embarked_Q" in input_dict:
+        input_dict["Embarked_Q"] = 1 if embarked == "Q" else 0
+    if "Embarked_S" in input_dict:
+        input_dict["Embarked_S"] = 1 if embarked == "S" else 0
+
+    return pd.DataFrame([input_dict])
+
+
+# -----------------------------
+# Load assets
+# -----------------------------
+df = load_raw_data()
+df_model, X, y = preprocess_data(df)
+models = load_models()
+X_train, X_test, y_train, y_test = split_data(X, y)
+results_df, roc_dict = evaluate_models(models, X_test, y_test)
+
+best_model_name = results_df.iloc[0]["Model"]
+best_tree_model_name = "XGBoost" if "XGBoost" in models else "Random Forest"
+best_tree_model = models[best_tree_model_name]
+
+# SHAP values for tree model
+@st.cache_resource
+def get_shap_objects(_model, X_background, X_sample):
+    explainer = shap.TreeExplainer(_model)
+    shap_values = explainer.shap_values(X_sample)
+    return explainer, shap_values
+
+explainer, shap_values = get_shap_objects(best_tree_model, X_train, X_test)
+
+
+# -----------------------------
+# App UI
+# -----------------------------
+st.title("Titanic Survival Prediction — MSIS 522 HW1")
+
+tab1, tab2, tab3, tab4 = st.tabs(
+    [
+        "Executive Summary",
+        "Descriptive Analytics",
+        "Model Performance",
+        "Explainability & Interactive Prediction",
+    ]
+)
+
+# -----------------------------
+# Tab 1
+# -----------------------------
 with tab1:
-
     st.header("Executive Summary")
 
-    st.write("""
-This project analyzes the Titanic dataset to predict passenger survival.  
-The dataset contains demographic and ticket information for passengers aboard the Titanic, including age, gender, passenger class, ticket fare, and family relationships.
+    st.write(
+        """
+This project uses the Titanic dataset to predict whether a passenger survived the disaster.
+The target variable is **Survived**, a binary outcome where 1 indicates survival and 0 indicates non-survival.
 
-The target variable **Survived** indicates whether a passenger survived the disaster.
+This prediction problem matters because the Titanic dataset captures how demographic and socioeconomic features
+such as gender, passenger class, age, and fare related to survival outcomes. It is a classic tabular classification
+problem that is well suited for end-to-end machine learning workflow development.
 
-Understanding survival patterns is useful because it highlights how demographic and socioeconomic factors influenced survival outcomes.
+The analysis includes descriptive analytics, model training, hyperparameter tuning, model comparison, explainability,
+and an interactive prediction interface. Five models were evaluated: Logistic Regression, Decision Tree, Random Forest,
+XGBoost, and a Neural Network (MLP).
+"""
+    )
 
-The workflow includes:
+    st.subheader("Dataset Overview")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Rows", f"{df.shape[0]}")
+    col2.metric("Columns", f"{df.shape[1]}")
+    col3.metric("Target", "Survived")
 
-• Exploratory Data Analysis  
-• Predictive Modeling  
-• Model Comparison  
-• Interactive Prediction Interface  
+    st.write("**Sample records:**")
+    st.dataframe(df.head(), use_container_width=True)
 
-Multiple machine learning models were trained to predict survival, including Logistic Regression, Decision Trees, Random Forest, XGBoost, and Neural Networks.
+    st.subheader("Key Finding")
+    st.write(
+        f"""
+Based on the test-set results shown in this app, the best-performing model by **F1 score** is
+**{best_model_name}**. Tree-based methods perform strongly on this dataset because they can capture
+nonlinear relationships and interactions among features more effectively than a simple linear baseline.
+"""
+    )
 
-These models were evaluated using accuracy, precision, recall, F1 score, and ROC-AUC metrics.
-""")
-
-    st.write("Dataset size:", df.shape)
-
-    st.dataframe(df.head())
-
-
-# ---------------------------------------------------
-# TAB 2
-# ---------------------------------------------------
-
+# -----------------------------
+# Tab 2
+# -----------------------------
 with tab2:
-
     st.header("Descriptive Analytics")
 
-    st.subheader("Target Distribution")
+    col_left, col_right = st.columns(2)
 
-    fig, ax = plt.subplots()
-    sns.countplot(x="Survived", data=df, ax=ax)
-    st.pyplot(fig)
+    with col_left:
+        st.subheader("Target Distribution")
+        fig, ax = plt.subplots()
+        sns.countplot(x="Survived", data=df, ax=ax)
+        ax.set_title("Target Distribution: Survived")
+        st.pyplot(fig)
+        st.caption(
+            "The dataset contains more passengers who did not survive than passengers who survived, indicating a mild class imbalance."
+        )
 
-    st.write("""
-The dataset contains more passengers who did not survive than those who did.
-This indicates a slight class imbalance in the prediction task.
-""")
+    with col_right:
+        st.subheader("Survival by Gender")
+        fig, ax = plt.subplots()
+        sns.countplot(x="Sex", hue="Survived", data=df, ax=ax)
+        ax.set_title("Survival by Gender")
+        st.pyplot(fig)
+        st.caption(
+            "Female passengers had much higher survival rates than male passengers, suggesting gender was strongly associated with survival."
+        )
 
-    st.subheader("Survival by Gender")
+    col_left, col_right = st.columns(2)
 
-    fig, ax = plt.subplots()
-    sns.countplot(x="Sex", hue="Survived", data=df, ax=ax)
-    st.pyplot(fig)
+    with col_left:
+        st.subheader("Survival by Passenger Class")
+        fig, ax = plt.subplots()
+        sns.countplot(x="Pclass", hue="Survived", data=df, ax=ax)
+        ax.set_title("Survival by Passenger Class")
+        st.pyplot(fig)
+        st.caption(
+            "Passengers in first class survived at much higher rates than passengers in third class, showing the impact of socioeconomic status."
+        )
 
-    st.write("""
-Female passengers had significantly higher survival rates than male passengers.
-This suggests gender played an important role in survival outcomes.
-""")
+    with col_right:
+        st.subheader("Fare vs Survival")
+        fig, ax = plt.subplots()
+        sns.boxplot(x="Survived", y="Fare", data=df, ax=ax)
+        ax.set_title("Fare vs Survival")
+        st.pyplot(fig)
+        st.caption(
+            "Higher-fare passengers generally had higher survival rates, which is consistent with the class-based survival pattern."
+        )
 
-    st.subheader("Survival by Passenger Class")
+    col_left, col_right = st.columns(2)
 
-    fig, ax = plt.subplots()
-    sns.countplot(x="Pclass", hue="Survived", data=df, ax=ax)
-    st.pyplot(fig)
+    with col_left:
+        st.subheader("Age Distribution")
+        fig, ax = plt.subplots()
+        sns.histplot(df["Age"], bins=30, kde=True, ax=ax)
+        ax.set_title("Age Distribution")
+        st.pyplot(fig)
+        st.caption(
+            "Most passengers were between roughly 20 and 40 years old, with some missing values originally present in the Age feature."
+        )
 
-    st.write("""
-Passengers traveling in first class had much higher survival rates than those in third class.
-This indicates socioeconomic status likely influenced survival chances.
-""")
+    with col_right:
+        st.subheader("Correlation Heatmap")
+        fig, ax = plt.subplots(figsize=(8, 5))
+        sns.heatmap(df_model.corr(), cmap="coolwarm", ax=ax)
+        ax.set_title("Correlation Heatmap")
+        st.pyplot(fig)
+        st.caption(
+            "The heatmap shows relationships among the modeled variables and helps identify features that may contribute to prediction performance."
+        )
 
-    st.subheader("Fare vs Survival")
-
-    fig, ax = plt.subplots()
-    sns.boxplot(x="Survived", y="Fare", data=df, ax=ax)
-    st.pyplot(fig)
-
-    st.write("""
-Passengers who paid higher ticket fares tended to have higher survival rates.
-This may reflect differences in access to resources and evacuation priority.
-""")
-
-    st.subheader("Age Distribution")
-
-    fig, ax = plt.subplots()
-    sns.histplot(df["Age"], bins=30, kde=True, ax=ax)
-    st.pyplot(fig)
-
-    st.write("""
-Most passengers were between 20 and 40 years old.
-Age may also influence survival probability.
-""")
-
-
-# ---------------------------------------------------
-# TAB 3
-# ---------------------------------------------------
-
+# -----------------------------
+# Tab 3
+# -----------------------------
 with tab3:
-
     st.header("Model Performance")
 
-    st.write("""
-Several machine learning models were trained and evaluated:
+    st.subheader("Model Comparison Table")
+    display_df = results_df.copy()
+    for col in ["Accuracy", "Precision", "Recall", "F1", "AUC"]:
+        display_df[col] = display_df[col].round(4)
 
-• Logistic Regression  
-• Decision Tree  
-• Random Forest  
-• XGBoost  
-• Neural Network (MLP)
-""")
+    st.dataframe(display_df, use_container_width=True)
 
-    st.write("Example comparison table:")
-
-    results = pd.DataFrame({
-        "Model": ["Logistic Regression", "Decision Tree", "Random Forest", "XGBoost", "Neural Network"],
-        "Accuracy": [0.80, 0.78, 0.82, 0.84, 0.81],
-        "F1 Score": [0.78, 0.75, 0.80, 0.82, 0.79]
-    })
-
-    st.dataframe(results)
-
-    st.subheader("Model Comparison")
-
-    fig, ax = plt.subplots()
-    sns.barplot(data=results, x="Model", y="F1 Score", ax=ax)
+    st.subheader("F1 Score Comparison")
+    fig, ax = plt.subplots(figsize=(10, 5))
+    sns.barplot(data=results_df, x="Model", y="F1", ax=ax)
+    ax.set_title("Model Comparison by F1 Score")
     plt.xticks(rotation=20)
     st.pyplot(fig)
 
-    st.write("""
-Tree-based models such as Random Forest and XGBoost tend to perform better for tabular datasets because they capture nonlinear relationships and feature interactions.
-""")
+    st.subheader("ROC Curves")
+    fig, ax = plt.subplots(figsize=(8, 6))
+    for model_name, (fpr, tpr, auc) in roc_dict.items():
+        ax.plot(fpr, tpr, label=f"{model_name} (AUC={auc:.3f})")
+    ax.plot([0, 1], [0, 1], linestyle="--")
+    ax.set_xlabel("False Positive Rate")
+    ax.set_ylabel("True Positive Rate")
+    ax.set_title("ROC Curves for All Models")
+    ax.legend(fontsize=8)
+    st.pyplot(fig)
 
+    st.subheader("Best Hyperparameters")
+    st.write(
+        """
+The notebook used hyperparameter tuning for the following models:
 
-# ---------------------------------------------------
-# TAB 4
-# ---------------------------------------------------
+- **Decision Tree:** max_depth, min_samples_leaf  
+- **Random Forest:** n_estimators, max_depth  
+- **XGBoost:** n_estimators, max_depth, learning_rate  
 
+The exact best settings were selected in the notebook using GridSearchCV and are reflected in the saved model files used by this app.
+"""
+    )
+
+# -----------------------------
+# Tab 4
+# -----------------------------
 with tab4:
+    st.header("Explainability & Interactive Prediction")
 
-    st.header("Interactive Prediction")
+    st.subheader("SHAP Summary Plot")
+    fig = plt.figure()
+    shap.summary_plot(shap_values, X_test, show=False)
+    st.pyplot(fig, clear_figure=True)
 
-    st.write("Adjust passenger features to simulate survival prediction.")
+    st.subheader("SHAP Feature Importance (Bar Plot)")
+    fig = plt.figure()
+    shap.summary_plot(shap_values, X_test, plot_type="bar", show=False)
+    st.pyplot(fig, clear_figure=True)
 
-    pclass = st.slider("Passenger Class", 1, 3, 3)
-    age = st.slider("Age", 0, 80, 30)
-    fare = st.slider("Fare", 0.0, 500.0, 50.0)
-    sex = st.selectbox("Sex", ["male", "female"])
+    st.subheader("SHAP Waterfall Plot for One Prediction")
+    sample_idx = st.slider("Choose a test sample for SHAP waterfall", 0, len(X_test) - 1, 0)
 
-    if sex == "male":
-        survival_probability = 0.25
+    shap_explanation = shap.Explanation(
+        values=shap_values[sample_idx],
+        base_values=explainer.expected_value,
+        data=X_test.iloc[sample_idx],
+        feature_names=X_test.columns.tolist(),
+    )
+
+    fig = plt.figure()
+    shap.plots.waterfall(shap_explanation, show=False)
+    st.pyplot(fig, clear_figure=True)
+
+    st.markdown("---")
+    st.subheader("Interactive Prediction")
+
+    selected_model_name = st.selectbox("Choose a model", list(models.keys()))
+    selected_model = models[selected_model_name]
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        pclass = st.slider("Passenger Class", 1, 3, 3)
+        age = st.slider("Age", 0, 80, 30)
+        sibsp = st.slider("Siblings / Spouses Aboard", 0, 8, 0)
+    with col2:
+        parch = st.slider("Parents / Children Aboard", 0, 6, 0)
+        fare = st.slider("Fare", 0.0, 550.0, 32.0)
+        sex = st.selectbox("Sex", ["male", "female"])
+    with col3:
+        embarked = st.selectbox("Embarked", ["C", "Q", "S"])
+
+    user_input = build_input_df(
+        X.columns,
+        pclass=pclass,
+        age=age,
+        sibsp=sibsp,
+        parch=parch,
+        fare=fare,
+        sex=sex,
+        embarked=embarked,
+    )
+
+    prediction = selected_model.predict(user_input)[0]
+
+    if hasattr(selected_model, "predict_proba"):
+        probability = float(selected_model.predict_proba(user_input)[0][1])
+        st.write(f"**Predicted survival probability:** {probability:.4f}")
     else:
-        survival_probability = 0.75
+        probability = None
 
-    st.write("Estimated survival probability:", round(survival_probability, 2))
-
-    if survival_probability > 0.5:
+    if prediction == 1:
         st.success("Predicted Outcome: Survived")
     else:
         st.error("Predicted Outcome: Did Not Survive")
+
+    st.write("**Encoded model input used for prediction:**")
+    st.dataframe(user_input, use_container_width=True)
