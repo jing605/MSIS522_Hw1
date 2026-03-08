@@ -1,0 +1,6 @@
+Model,Best Hyperparameters
+Logistic Regression,"{'max_iter': 1000, 'random_state': 42}"
+Decision Tree,"{'max_depth': 7, 'min_samples_leaf': 10}"
+Random Forest,"{'max_depth': 5, 'n_estimators': 100}"
+XGBoost,"{'learning_rate': 0.1, 'max_depth': 6, 'n_estimators': 100}"
+Neural Network (MLP),"{'hidden_layer_sizes': (128, 128), 'activation': 'relu', 'solver': 'adam', 'max_iter': 500, 'random_state': 42}"
