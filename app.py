@@ -255,8 +255,8 @@ This suggests that for this Titanic feature set, a relatively simple linear deci
     st.subheader("Key Findings")
     st.markdown(
         """
-- Survival was clearly associated with **gender** and **passenger class**, with women and first-class passengers surviving at higher rates.
-- In the trained models, **Logistic Regression** slightly outperformed the ensemble models on F1, while **Random Forest** remained competitive and achieved strong precision.
+- The strongest survival patterns in the Titanic dataset were associated with gender, passenger class, and fare. Female passengers and first-class passengers were much more likely to survive, while lower-class status and being male were associated with lower survival probability. 
+- Across five models, Logistic Regression achieved the strongest F1 score and AUC on the test set, slightly outperforming the more complex tree-based and neural models. This suggests that the Titanic survival signal in this feature set is relatively structured and can be captured effectively even by a simpler baseline model.
 - SHAP analysis from the best-performing tree-based model showed that **Sex_male, Pclass, Fare, and Age** were the most influential features in predicting survival.
 """
     )
