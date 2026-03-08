@@ -20,7 +20,7 @@ st.set_page_config(page_title="Titanic Survival Prediction", layout="wide")
 
 
 # -----------------------------
-# Helpers
+# Load + preprocess
 # -----------------------------
 @st.cache_data
 def load_raw_data():
@@ -50,14 +50,13 @@ def preprocess_data(df: pd.DataFrame):
 
 @st.cache_resource
 def load_models():
-    models = {
+    return {
         "Logistic Regression": joblib.load("logistic_model.pkl"),
         "Decision Tree": joblib.load("decision_tree_model.pkl"),
         "Random Forest": joblib.load("random_forest_model.pkl"),
         "XGBoost": joblib.load("xgboost_model.pkl"),
         "Neural Network (MLP)": joblib.load("mlp_model.pkl"),
     }
-    return models
 
 
 @st.cache_data
@@ -66,11 +65,13 @@ def split_data(X, y):
 
 
 @st.cache_data
-def evaluate_models(_models, X_test, y_test):
+def evaluate_models(X_test, y_test):
+    models = load_models()
+
     rows = []
     roc_dict = {}
 
-    for model_name, model in _models.items():
+    for model_name, model in models.items():
         y_pred = model.predict(X_test)
 
         if hasattr(model, "predict_proba"):
@@ -109,7 +110,6 @@ def build_input_df(
 ):
     input_dict = {col: 0 for col in X_columns}
 
-    # numeric columns
     if "Pclass" in input_dict:
         input_dict["Pclass"] = pclass
     if "Age" in input_dict:
@@ -121,12 +121,10 @@ def build_input_df(
     if "Fare" in input_dict:
         input_dict["Fare"] = fare
 
-    # encoded columns from get_dummies(drop_first=True)
-    # Sex -> likely only Sex_male
     if "Sex_male" in input_dict:
         input_dict["Sex_male"] = 1 if sex == "male" else 0
 
-    # Embarked -> likely Embarked_Q and Embarked_S, with C as baseline
+    # get_dummies(drop_first=True): C is baseline
     if "Embarked_Q" in input_dict:
         input_dict["Embarked_Q"] = 1 if embarked == "Q" else 0
     if "Embarked_S" in input_dict:
@@ -136,31 +134,55 @@ def build_input_df(
 
 
 # -----------------------------
-# Load assets
+# Data objects
 # -----------------------------
 df = load_raw_data()
 df_model, X, y = preprocess_data(df)
 models = load_models()
 X_train, X_test, y_train, y_test = split_data(X, y)
-results_df, roc_dict = evaluate_models(models, X_test, y_test)
-hyperparams_df = pd.read_csv("model_hyperparameters.csv")
+results_df, roc_dict = evaluate_models(X_test, y_test)
 
 best_model_name = results_df.iloc[0]["Model"]
 best_tree_model_name = "XGBoost" if "XGBoost" in models else "Random Forest"
 best_tree_model = models[best_tree_model_name]
 
-# SHAP values for tree model
+# -----------------------------
+# Hyperparameter table
+# Replace these with your actual best params if different
+# -----------------------------
+hyperparams_df = pd.DataFrame(
+    {
+        "Model": [
+            "Logistic Regression",
+            "Decision Tree",
+            "Random Forest",
+            "XGBoost",
+            "Neural Network (MLP)",
+        ],
+        "Best Hyperparameters": [
+            "max_iter=1000, random_state=42",
+            "max_depth=5, min_samples_leaf=10",
+            "n_estimators=200, max_depth=5, random_state=42",
+            "n_estimators=100, max_depth=4, learning_rate=0.1, random_state=42",
+            "hidden_layer_sizes=(128,128), activation='relu', solver='adam', max_iter=500, random_state=42",
+        ],
+    }
+)
+
+# -----------------------------
+# SHAP
+# -----------------------------
 @st.cache_resource
-def get_shap_objects(_model, X_background, X_sample):
-    explainer = shap.TreeExplainer(_model)
-    shap_values = explainer.shap_values(X_sample)
+def get_shap_objects():
+    explainer = shap.TreeExplainer(best_tree_model)
+    shap_values = explainer.shap_values(X_test)
     return explainer, shap_values
 
-explainer, shap_values = get_shap_objects(best_tree_model, X_train, X_test)
+explainer, shap_values = get_shap_objects()
 
 
 # -----------------------------
-# App UI
+# UI
 # -----------------------------
 st.title("Titanic Survival Prediction — MSIS 522 HW1")
 
@@ -181,34 +203,30 @@ with tab1:
 
     st.write(
         """
-This project uses the Titanic dataset to predict whether a passenger survived the disaster.
+This project analyzes the Titanic dataset to predict whether a passenger survived the disaster. 
 The target variable is **Survived**, a binary outcome where 1 indicates survival and 0 indicates non-survival.
 
-This prediction problem matters because the Titanic dataset captures how demographic and socioeconomic features
-such as gender, passenger class, age, and fare related to survival outcomes. It is a classic tabular classification
-problem that is well suited for end-to-end machine learning workflow development.
+This problem is meaningful because the Titanic dataset captures how demographic and socioeconomic features such as gender, age, fare, and passenger class relate to survival outcomes. 
+It serves as a classic binary classification problem for demonstrating a complete machine learning workflow on tabular data.
 
-The analysis includes descriptive analytics, model training, hyperparameter tuning, model comparison, explainability,
-and an interactive prediction interface. Five models were evaluated: Logistic Regression, Decision Tree, Random Forest,
-XGBoost, and a Neural Network (MLP).
+The workflow includes descriptive analytics, predictive modeling, model comparison, explainability, and an interactive prediction interface. 
+Five models were trained and evaluated: Logistic Regression, Decision Tree, Random Forest, XGBoost, and a Neural Network (MLP).
 """
     )
 
-    st.subheader("Dataset Overview")
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Rows", f"{df.shape[0]}")
-    col2.metric("Columns", f"{df.shape[1]}")
-    col3.metric("Target", "Survived")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Rows", df.shape[0])
+    c2.metric("Columns", df.shape[1])
+    c3.metric("Best Model (F1)", best_model_name)
 
-    st.write("**Sample records:**")
+    st.subheader("Dataset Preview")
     st.dataframe(df.head(), use_container_width=True)
 
     st.subheader("Key Finding")
     st.write(
         f"""
-Based on the test-set results shown in this app, the best-performing model by **F1 score** is
-**{best_model_name}**. Tree-based methods perform strongly on this dataset because they can capture
-nonlinear relationships and interactions among features more effectively than a simple linear baseline.
+Based on the test-set evaluation in this app, **{best_model_name}** achieved the strongest F1 performance. 
+Tree-based models generally perform well on tabular datasets because they can capture nonlinear relationships and interactions among passenger characteristics.
 """
     )
 
@@ -218,70 +236,76 @@ nonlinear relationships and interactions among features more effectively than a 
 with tab2:
     st.header("Descriptive Analytics")
 
-    col_left, col_right = st.columns(2)
+    col1, col2 = st.columns(2)
 
-    with col_left:
+    with col1:
         st.subheader("Target Distribution")
         fig, ax = plt.subplots()
         sns.countplot(x="Survived", data=df, ax=ax)
         ax.set_title("Target Distribution: Survived")
         st.pyplot(fig)
         st.caption(
-            "The dataset contains more passengers who did not survive than passengers who survived, indicating a mild class imbalance."
+            "The dataset contains more passengers who did not survive than passengers who survived. "
+            "This indicates a mild class imbalance in the target."
         )
 
-    with col_right:
+    with col2:
         st.subheader("Survival by Gender")
         fig, ax = plt.subplots()
         sns.countplot(x="Sex", hue="Survived", data=df, ax=ax)
         ax.set_title("Survival by Gender")
         st.pyplot(fig)
         st.caption(
-            "Female passengers had much higher survival rates than male passengers, suggesting gender was strongly associated with survival."
+            "Female passengers had much higher survival rates than male passengers. "
+            "This suggests gender was one of the strongest predictors of survival."
         )
 
-    col_left, col_right = st.columns(2)
+    col3, col4 = st.columns(2)
 
-    with col_left:
+    with col3:
         st.subheader("Survival by Passenger Class")
         fig, ax = plt.subplots()
         sns.countplot(x="Pclass", hue="Survived", data=df, ax=ax)
         ax.set_title("Survival by Passenger Class")
         st.pyplot(fig)
         st.caption(
-            "Passengers in first class survived at much higher rates than passengers in third class, showing the impact of socioeconomic status."
+            "Passengers in first class survived at much higher rates than those in third class. "
+            "This highlights the role of socioeconomic status in survival outcomes."
         )
 
-    with col_right:
+    with col4:
         st.subheader("Fare vs Survival")
         fig, ax = plt.subplots()
         sns.boxplot(x="Survived", y="Fare", data=df, ax=ax)
         ax.set_title("Fare vs Survival")
         st.pyplot(fig)
         st.caption(
-            "Higher-fare passengers generally had higher survival rates, which is consistent with the class-based survival pattern."
+            "Passengers who paid higher fares tended to survive more often. "
+            "This pattern is consistent with the effect of passenger class."
         )
 
-    col_left, col_right = st.columns(2)
+    col5, col6 = st.columns(2)
 
-    with col_left:
+    with col5:
         st.subheader("Age Distribution")
         fig, ax = plt.subplots()
         sns.histplot(df["Age"], bins=30, kde=True, ax=ax)
         ax.set_title("Age Distribution")
         st.pyplot(fig)
         st.caption(
-            "Most passengers were between roughly 20 and 40 years old, with some missing values originally present in the Age feature."
+            "Most passengers were between about 20 and 40 years old. "
+            "Age may influence vulnerability and priority during evacuation."
         )
 
-    with col_right:
+    with col6:
         st.subheader("Correlation Heatmap")
         fig, ax = plt.subplots(figsize=(8, 5))
         sns.heatmap(df_model.corr(), cmap="coolwarm", ax=ax)
         ax.set_title("Correlation Heatmap")
         st.pyplot(fig)
         st.caption(
-            "The heatmap shows relationships among the modeled variables and helps identify features that may contribute to prediction performance."
+            "The heatmap summarizes relationships among encoded modeling variables. "
+            "It helps identify features that are likely to contribute to predictive performance."
         )
 
 # -----------------------------
@@ -289,18 +313,18 @@ with tab2:
 # -----------------------------
 with tab3:
     st.header("Model Performance")
+
     st.write(
-    """
-    This section summarizes the predictive performance of all five models trained in Part 2. 
-    It includes the comparison table, F1 score bar chart, ROC curves, and the final hyperparameter settings used for each model.
-    """
-)
+        """
+This section summarizes the predictive performance of all five models trained in Part 2. 
+It includes the model comparison table, F1 score comparison, ROC curves, and the final hyperparameter settings used for each model.
+"""
+    )
 
     st.subheader("Model Comparison Table")
     display_df = results_df.copy()
     for col in ["Accuracy", "Precision", "Recall", "F1", "AUC"]:
         display_df[col] = display_df[col].round(4)
-
     st.dataframe(display_df, use_container_width=True)
 
     st.subheader("F1 Score Comparison")
@@ -323,23 +347,13 @@ with tab3:
 
     st.subheader("Best Hyperparameters")
     st.write(
-    """
-    The table below reports the selected hyperparameters used for each model. 
-    For Decision Tree, Random Forest, and XGBoost, the values come from GridSearchCV. 
-    For Logistic Regression and MLP, the table reports the final settings used in the notebook.
-    """
-)
-
-st.dataframe(hyperparams_df, use_container_width=True)
-The notebook used hyperparameter tuning for the following models:
-
-- **Decision Tree:** max_depth, min_samples_leaf  
-- **Random Forest:** n_estimators, max_depth  
-- **XGBoost:** n_estimators, max_depth, learning_rate  
-
-The exact best settings were selected in the notebook using GridSearchCV and are reflected in the saved model files used by this app.
+        """
+The table below reports the selected hyperparameters used for each model. 
+For Decision Tree, Random Forest, and XGBoost, the values come from GridSearchCV. 
+For Logistic Regression and MLP, the table reports the final settings used in the notebook.
 """
     )
+    st.dataframe(hyperparams_df, use_container_width=True)
 
 # -----------------------------
 # Tab 4
@@ -347,18 +361,18 @@ The exact best settings were selected in the notebook using GridSearchCV and are
 with tab4:
     st.header("Explainability & Interactive Prediction")
 
-    st.subheader("SHAP Summary Plot")
+    st.subheader(f"SHAP Summary Plot ({best_tree_model_name})")
     fig = plt.figure()
     shap.summary_plot(shap_values, X_test, show=False)
     st.pyplot(fig, clear_figure=True)
 
-    st.subheader("SHAP Feature Importance (Bar Plot)")
+    st.subheader(f"SHAP Feature Importance Bar Plot ({best_tree_model_name})")
     fig = plt.figure()
     shap.summary_plot(shap_values, X_test, plot_type="bar", show=False)
     st.pyplot(fig, clear_figure=True)
 
-    st.subheader("SHAP Waterfall Plot for One Prediction")
-    sample_idx = st.slider("Choose a test sample for SHAP waterfall", 0, len(X_test) - 1, 0)
+    st.subheader("SHAP Waterfall Plot for One Test Prediction")
+    sample_idx = st.slider("Choose a test sample", 0, len(X_test) - 1, 0)
 
     shap_explanation = shap.Explanation(
         values=shap_values[sample_idx],
@@ -377,16 +391,19 @@ with tab4:
     selected_model_name = st.selectbox("Choose a model", list(models.keys()))
     selected_model = models[selected_model_name]
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
         pclass = st.slider("Passenger Class", 1, 3, 3)
         age = st.slider("Age", 0, 80, 30)
         sibsp = st.slider("Siblings / Spouses Aboard", 0, 8, 0)
-    with col2:
+
+    with c2:
         parch = st.slider("Parents / Children Aboard", 0, 6, 0)
         fare = st.slider("Fare", 0.0, 550.0, 32.0)
         sex = st.selectbox("Sex", ["male", "female"])
-    with col3:
+
+    with c3:
         embarked = st.selectbox("Embarked", ["C", "Q", "S"])
 
     user_input = build_input_df(
