@@ -143,6 +143,7 @@ df_model, X, y = preprocess_data(df)
 models = load_models()
 X_train, X_test, y_train, y_test = split_data(X, y)
 results_df, roc_dict = evaluate_models(models, X_test, y_test)
+hyperparams_df = pd.read_csv("model_hyperparameters.csv")
 
 best_model_name = results_df.iloc[0]["Model"]
 best_tree_model_name = "XGBoost" if "XGBoost" in models else "Random Forest"
@@ -288,6 +289,12 @@ with tab2:
 # -----------------------------
 with tab3:
     st.header("Model Performance")
+    st.write(
+    """
+    This section summarizes the predictive performance of all five models trained in Part 2. 
+    It includes the comparison table, F1 score bar chart, ROC curves, and the final hyperparameter settings used for each model.
+    """
+)
 
     st.subheader("Model Comparison Table")
     display_df = results_df.copy()
@@ -316,7 +323,14 @@ with tab3:
 
     st.subheader("Best Hyperparameters")
     st.write(
-        """
+    """
+    The table below reports the selected hyperparameters used for each model. 
+    For Decision Tree, Random Forest, and XGBoost, the values come from GridSearchCV. 
+    For Logistic Regression and MLP, the table reports the final settings used in the notebook.
+    """
+)
+
+st.dataframe(hyperparams_df, use_container_width=True)
 The notebook used hyperparameter tuning for the following models:
 
 - **Decision Tree:** max_depth, min_samples_leaf  
