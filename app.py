@@ -33,7 +33,7 @@ def load_raw_data():
 def preprocess_data(df: pd.DataFrame):
     df_model = df.copy()
 
-    # Same preprocessing as notebook
+    # same preprocessing as notebook
     df_model["Age"] = df_model["Age"].fillna(df_model["Age"].median())
     df_model["Embarked"] = df_model["Embarked"].fillna(df_model["Embarked"].mode()[0])
 
@@ -45,7 +45,7 @@ def preprocess_data(df: pd.DataFrame):
 
     df_model = pd.get_dummies(df_model, drop_first=True)
 
-    # Convert bool columns to int to avoid model compatibility issues
+    # avoid bool dtype issues across environments
     for col in df_model.columns:
         if df_model[col].dtype == bool:
             df_model[col] = df_model[col].astype(int)
@@ -73,12 +73,12 @@ def split_data(X, y):
 
 
 @st.cache_data
-def get_eval_outputs(X_test, y_test):
+def evaluate_models(X_test, y_test):
     models = load_models()
 
+    rows = []
     roc_dict = {}
-    confusion_dict = {}
-    live_rows = []
+    cm_dict = {}
 
     for model_name, model in models.items():
         y_pred = model.predict(X_test)
@@ -92,9 +92,9 @@ def get_eval_outputs(X_test, y_test):
 
         fpr, tpr, _ = roc_curve(y_test, y_prob)
         roc_dict[model_name] = (fpr, tpr, auc)
-        confusion_dict[model_name] = confusion_matrix(y_test, y_pred)
+        cm_dict[model_name] = confusion_matrix(y_test, y_pred)
 
-        live_rows.append(
+        rows.append(
             {
                 "Model": model_name,
                 "Accuracy": acc,
@@ -105,8 +105,8 @@ def get_eval_outputs(X_test, y_test):
             }
         )
 
-    live_results_df = pd.DataFrame(live_rows)
-    return roc_dict, confusion_dict, live_results_df
+    results_df = pd.DataFrame(rows).sort_values(by="F1", ascending=False).reset_index(drop=True)
+    return results_df, roc_dict, cm_dict
 
 
 def build_input_df(
@@ -121,7 +121,6 @@ def build_input_df(
 ):
     input_dict = {col: 0 for col in X_columns}
 
-    # numeric features
     if "Pclass" in input_dict:
         input_dict["Pclass"] = pclass
     if "Age" in input_dict:
@@ -133,46 +132,51 @@ def build_input_df(
     if "Fare" in input_dict:
         input_dict["Fare"] = fare
 
-    # encoded categorical variables from pd.get_dummies(drop_first=True)
     if "Sex_male" in input_dict:
         input_dict["Sex_male"] = 1 if sex == "male" else 0
 
-    # Embarked: C is baseline when drop_first=True
+    # get_dummies(drop_first=True): C is baseline
     if "Embarked_Q" in input_dict:
         input_dict["Embarked_Q"] = 1 if embarked == "Q" else 0
     if "Embarked_S" in input_dict:
         input_dict["Embarked_S"] = 1 if embarked == "S" else 0
 
     user_df = pd.DataFrame([input_dict])
-    user_df = user_df[X_columns]  # enforce exact column order
-    return user_df
+    return user_df[X_columns]
 
 
-def _standardize_shap_values(shap_values):
+def _to_class1_shap_values(shap_values):
     """
-    SHAP may return:
-    - ndarray of shape (n_samples, n_features)
-    - list of arrays for classification
-    This helper standardizes to ndarray (n_samples, n_features).
+    Normalize SHAP outputs across versions/models.
+    Returns array of shape (n_samples, n_features).
     """
     if isinstance(shap_values, list):
+        # binary classification often returns [class0, class1]
         if len(shap_values) == 2:
-            shap_values = shap_values[1]
-        else:
-            shap_values = shap_values[0]
+            return np.array(shap_values[1])
+        return np.array(shap_values[0])
 
     shap_values = np.array(shap_values)
 
+    # e.g. (n_samples, n_features, n_classes)
+    if shap_values.ndim == 3:
+        return shap_values[:, :, -1]
+
+    # e.g. (n_samples, n_features)
+    if shap_values.ndim == 2:
+        return shap_values
+
+    # e.g. single sample weird shape
     if shap_values.ndim == 1:
-        shap_values = shap_values.reshape(1, -1)
+        return shap_values.reshape(1, -1)
 
     return shap_values
 
 
 def _scalar_expected_value(expected_value):
-    if isinstance(expected_value, (list, np.ndarray)):
-        expected_value = np.array(expected_value).flatten()
-        return float(expected_value[-1])
+    if isinstance(expected_value, (list, tuple, np.ndarray)):
+        arr = np.array(expected_value).flatten()
+        return float(arr[-1])
     return float(expected_value)
 
 
@@ -183,10 +187,10 @@ df = load_raw_data()
 df_model, X, y = preprocess_data(df)
 models = load_models()
 X_train, X_test, y_train, y_test = split_data(X, y)
-roc_dict, confusion_dict, live_results_df = get_eval_outputs(X_test, y_test)
+live_results_df, roc_dict, cm_dict = evaluate_models(X_test, y_test)
 
-# Use actual notebook result table for exact reporting
-actual_results_df = pd.DataFrame(
+# exact notebook results table
+results_df = pd.DataFrame(
     {
         "Model": [
             "Logistic Regression",
@@ -204,7 +208,7 @@ actual_results_df = pd.DataFrame(
 ).sort_values(by="F1", ascending=False).reset_index(drop=True)
 
 best_model_name = "Logistic Regression"
-best_tree_model_name = "Random Forest"  # best-performing tree-based model by F1
+best_tree_model_name = "Random Forest"  # best-performing tree-based model
 best_tree_model = models[best_tree_model_name]
 
 hyperparams_df = pd.DataFrame(
@@ -226,17 +230,32 @@ hyperparams_df = pd.DataFrame(
     }
 )
 
+# bonus tuning results from your grid search
+bonus_tuning_df = pd.DataFrame(
+    {
+        "Hidden Layer Sizes": ["(64, 64)", "(64, 64)", "(64, 64)", "(128, 128)", "(128, 128)", "(128, 128)", "(128, 64)", "(128, 64)", "(128, 64)"],
+        "Learning Rate": [0.001, 0.01, 0.1, 0.001, 0.01, 0.1, 0.001, 0.01, 0.1],
+        "Mean CV F1": [0.695746, 0.705268, 0.595018, 0.699791, 0.717713, 0.388340, 0.716531, 0.720784, 0.596242],
+    }
+)
+
+bonus_best_params = {
+    "hidden_layer_sizes": "(128, 64)",
+    "learning_rate_init": 0.01,
+    "best_cv_f1": 0.720784,
+}
+
 @st.cache_resource
 def get_shap_explainer():
     return shap.TreeExplainer(best_tree_model)
 
 explainer = get_shap_explainer()
-shap_values_test = _standardize_shap_values(explainer.shap_values(X_test))
+shap_values_test = _to_class1_shap_values(explainer.shap_values(X_test))
 expected_value_scalar = _scalar_expected_value(explainer.expected_value)
 
 
 # ======================================================
-# UI
+# App UI
 # ======================================================
 st.title("Titanic Survival Prediction — MSIS 522 HW1")
 
@@ -258,31 +277,31 @@ with tab1:
     st.write(
         """
 This project analyzes the Titanic passenger dataset to predict whether a passenger survived the disaster. 
-The dataset contains 891 observations and 12 original variables describing demographic characteristics, travel class, fare, embarkation port, and family relationships. 
-The prediction target is **Survived**, a binary variable where 1 indicates survival and 0 indicates non-survival.
+The dataset contains 891 passenger records and 12 original variables describing demographic characteristics, travel class, ticket fare, embarkation port, and family relationships. 
+The target variable is **Survived**, where 1 indicates survival and 0 indicates non-survival.
 """
     )
 
     st.write(
         """
-This problem is meaningful because it provides a compact but realistic example of how machine learning can uncover which passenger characteristics were most strongly associated with survival outcomes. 
-From a decision-making perspective, the task demonstrates how structured data can be used not only for prediction, but also for explaining which factors most influence individual outcomes.
+This prediction task matters because it demonstrates how machine learning can uncover which passenger characteristics were most strongly associated with survival outcomes in a high-stakes historical event. 
+From a business analytics perspective, the project also shows how structured tabular data can be used not only to generate accurate predictions, but also to explain which variables most influence those predictions.
 """
     )
 
     st.write(
         """
-The workflow included descriptive analytics, preprocessing, multiple classification models, cross-validated hyperparameter tuning, ROC analysis, and SHAP explainability. 
-Five models were trained and compared: Logistic Regression, Decision Tree, Random Forest, XGBoost, and a Neural Network (MLP). 
-Among all models, **Logistic Regression achieved the best overall performance**, with the highest **F1 score (0.7606)** and **AUC (0.8806)** on the held-out test set.
+The workflow included descriptive analytics, preprocessing, five classification models, cross-validated hyperparameter tuning for tree-based methods, ROC analysis, SHAP explainability, and an interactive prediction interface. 
+The five models compared were Logistic Regression, Decision Tree, Random Forest, XGBoost, and a Neural Network (MLP). 
+Among them, **Logistic Regression performed best overall**, achieving the highest **F1 score (0.7606)** and **AUC (0.8806)** on the held-out test set.
 """
     )
 
     st.write(
         """
-The results suggest that the survival signal in this Titanic feature set is relatively structured and can be captured effectively even by a simple linear baseline. 
-At the same time, SHAP analysis using the best-performing tree-based model showed that **gender, passenger class, fare, and age** were the most influential drivers of survival probability. 
-Overall, this project demonstrates both predictive modeling performance and interpretable insights for stakeholders who want to understand not just *what* the model predicts, but *why*.
+Although Random Forest and XGBoost remained highly competitive, the results suggest that the Titanic survival signal in this feature set is structured enough to be captured effectively by a relatively simple linear baseline. 
+SHAP analysis using the best-performing tree-based model showed that **gender, passenger class, fare, and age** were the most influential factors driving survival probability. 
+Together, these findings provide both predictive performance and interpretable insights that a non-technical stakeholder can understand and trust.
 """
     )
 
@@ -298,7 +317,7 @@ Overall, this project demonstrates both predictive modeling performance and inte
     st.subheader("Feature Overview")
     st.write(
         """
-The original dataset contains both numerical and categorical variables. 
+The original dataset includes both numerical and categorical variables. 
 Numerical variables include PassengerId, Survived, Pclass, Age, SibSp, Parch, and Fare, while categorical variables include Name, Sex, Ticket, Cabin, and Embarked.
 """
     )
@@ -318,10 +337,9 @@ with tab2:
         ax.set_title("Target Distribution: Survived")
         st.pyplot(fig)
         plt.close(fig)
-
         st.caption(
             "The dataset contains more passengers who did not survive than passengers who survived. "
-            "The class imbalance is moderate rather than extreme, so standard binary classification models remain appropriate while still making F1 and AUC useful evaluation metrics."
+            "This indicates a moderate class imbalance rather than an extreme one, so the classification task remains well suited to standard supervised models."
         )
 
     with col2:
@@ -331,7 +349,6 @@ with tab2:
         ax.set_title("Survival by Gender")
         st.pyplot(fig)
         plt.close(fig)
-
         st.caption(
             "Female passengers survived at much higher rates than male passengers. "
             "This large separation suggests that gender is one of the strongest predictors of survival in the dataset."
@@ -346,10 +363,9 @@ with tab2:
         ax.set_title("Survival by Passenger Class")
         st.pyplot(fig)
         plt.close(fig)
-
         st.caption(
-            "Passengers in first class had much higher survival rates than passengers in third class. "
-            "This indicates that socioeconomic status likely influenced access to safety resources and evacuation opportunities."
+            "Passengers in first class survived at much higher rates than passengers in third class. "
+            "This pattern suggests that socioeconomic status likely affected access to lifeboats and evacuation priority."
         )
 
     with col4:
@@ -359,10 +375,9 @@ with tab2:
         ax.set_title("Fare vs Survival")
         st.pyplot(fig)
         plt.close(fig)
-
         st.caption(
             "Passengers who survived generally paid higher fares on average. "
-            "Because fare is closely related to passenger class, it appears to act as an additional proxy for status and travel conditions."
+            "Because fare is closely related to class, it appears to capture additional information about travel conditions and passenger status."
         )
 
     col5, col6 = st.columns(2)
@@ -374,10 +389,9 @@ with tab2:
         ax.set_title("Age Distribution")
         st.pyplot(fig)
         plt.close(fig)
-
         st.caption(
-            "Most passengers were concentrated between roughly ages 20 and 40, with a right-skewed tail into older ages. "
-            "Age may influence survival, but its effect appears more subtle than the stronger gender and class differences visible in the other plots."
+            "Most passengers were concentrated between about 20 and 40 years old, with a longer tail toward older ages. "
+            "Age still matters for modeling, but its effect appears less visually dramatic than the differences seen for gender and class."
         )
 
     with col6:
@@ -387,10 +401,9 @@ with tab2:
         ax.set_title("Correlation Heatmap")
         st.pyplot(fig)
         plt.close(fig)
-
         st.caption(
             "The heatmap shows that survival is negatively correlated with `Sex_male` and `Pclass`, and positively correlated with `Fare`. "
-            "These correlations are consistent with the visual patterns above and suggest that gender, class, and fare should play an important role in predictive modeling."
+            "These relationships are consistent with the visual patterns above and suggest that gender, class, and ticket price will play an important role in modeling."
         )
 
 # ======================================================
@@ -401,29 +414,29 @@ with tab3:
 
     st.write(
         """
-This section surfaces the main outputs from Part 2 of the assignment so that a reader can evaluate all models without opening the notebook. 
-It includes the model comparison table, F1 comparison chart, ROC curves, selected hyperparameters, and additional diagnostics such as the MLP loss curve and the best decision tree visualization.
+This section surfaces the key outputs from Part 2 so a reader can evaluate the models without opening the notebook. 
+It includes the comparison table, the F1 bar chart, ROC curves, selected hyperparameters, the MLP loss curve, the best decision tree, and a bonus neural-network tuning visualization.
 """
     )
 
     st.subheader("Data Preparation Summary")
     st.write(
         """
-The modeling pipeline used `Survived` as the target variable and all remaining processed variables as features. 
-Missing values in **Age** were filled with the median, missing values in **Embarked** were filled with the mode, and identifier-like columns such as PassengerId, Name, Ticket, and Cabin were dropped. 
-Categorical variables were then one-hot encoded, and the data was split into a 70/30 train-test split using `random_state=42`.
+`Survived` was used as the target variable and all remaining processed columns were used as model features. 
+Missing values in **Age** were imputed with the median and missing values in **Embarked** were filled with the mode. 
+PassengerId, Name, Ticket, and Cabin were dropped, categorical variables were one-hot encoded, and the data was split into a 70/30 train-test split using `random_state=42`.
 """
     )
 
     st.subheader("Model Comparison Table")
-    display_df = actual_results_df.copy()
+    display_df = results_df.copy()
     for col in ["Accuracy", "Precision", "Recall", "F1", "AUC"]:
         display_df[col] = display_df[col].round(4)
     st.dataframe(display_df, use_container_width=True)
 
     st.subheader("F1 Score Comparison")
     fig, ax = plt.subplots(figsize=(10, 5))
-    sns.barplot(data=actual_results_df, x="Model", y="F1", ax=ax)
+    sns.barplot(data=results_df, x="Model", y="F1", ax=ax)
     ax.set_title("Model Comparison by F1 Score")
     plt.xticks(rotation=20)
     st.pyplot(fig)
@@ -444,9 +457,9 @@ Categorical variables were then one-hot encoded, and the data was split into a 7
     st.subheader("Best Hyperparameters")
     st.write(
         """
-The table below reports the selected hyperparameters used for each model. 
-For Decision Tree, Random Forest, and XGBoost, the values come from GridSearchCV. 
-For Logistic Regression and MLP, the table reports the final settings used in the notebook.
+The table below reports the final settings used for each model. 
+For Decision Tree, Random Forest, and XGBoost, these values come directly from GridSearchCV. 
+For Logistic Regression and MLP, the table reports the final training settings used in the notebook.
 """
     )
     st.dataframe(hyperparams_df, use_container_width=True)
@@ -479,21 +492,54 @@ For Logistic Regression and MLP, the table reports the final settings used in th
         cols = st.columns(2)
         model_names = list(models.keys())
         for i, model_name in enumerate(model_names):
-            cm = confusion_dict[model_name]
             fig, ax = plt.subplots(figsize=(4, 3))
-            sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax)
+            sns.heatmap(cm_dict[model_name], annot=True, fmt="d", cmap="Blues", ax=ax)
             ax.set_title(model_name)
             ax.set_xlabel("Predicted")
             ax.set_ylabel("Actual")
             cols[i % 2].pyplot(fig)
             plt.close(fig)
 
+    st.subheader("Bonus: Neural Network Hyperparameter Tuning")
+    st.write(
+        """
+A grid search was performed over hidden layer sizes and learning rates for the MLP model. 
+The best configuration used **hidden_layer_sizes = (128, 64)** and **learning_rate_init = 0.01**, achieving a best cross-validated F1 score of **0.7208**.
+"""
+    )
+
+    bonus_display = bonus_tuning_df.copy()
+    bonus_display["Mean CV F1"] = bonus_display["Mean CV F1"].round(4)
+    st.dataframe(bonus_display, use_container_width=True)
+
+    pivot = bonus_tuning_df.pivot(
+        index="Hidden Layer Sizes",
+        columns="Learning Rate",
+        values="Mean CV F1",
+    )
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    sns.heatmap(pivot, annot=True, cmap="viridis", ax=ax)
+    ax.set_title("MLP Hyperparameter Tuning (F1 score)")
+    ax.set_ylabel("Hidden Layer Sizes")
+    ax.set_xlabel("Learning Rate")
+    st.pyplot(fig)
+    plt.close(fig)
+
+    st.write(
+        """
+The heatmap shows that a learning rate of **0.01** produced the strongest and most stable performance across architectures. 
+A higher learning rate of **0.1** significantly degraded performance, suggesting unstable training. 
+Among the tested structures, **(128, 64)** provided the best balance between model capacity and generalization.
+"""
+    )
+
     st.subheader("Performance Interpretation")
     st.write(
         """
-Logistic Regression achieved the highest F1 score and the highest AUC, which was somewhat surprising given that ensemble tree models often dominate tabular tasks. 
-However, the margins were small: Random Forest and XGBoost were both highly competitive, and Random Forest delivered the strongest precision among all models. 
-This highlights a useful trade-off: the simpler baseline model was the overall winner, while the more complex tree-based models remained attractive when interpretability through feature interactions or precision-focused behavior is important.
+Logistic Regression achieved the highest F1 score and the highest AUC, which was somewhat surprising because tree ensembles often dominate tabular tasks. 
+However, Random Forest and XGBoost were both highly competitive, with Random Forest delivering the strongest precision among all models. 
+This illustrates a useful trade-off: the simpler linear baseline produced the best overall balance, while more complex models provided stronger nonlinear capacity at the cost of additional complexity and reduced interpretability.
 """
     )
 
@@ -504,12 +550,13 @@ with tab4:
     st.header("Explainability & Interactive Prediction")
 
     st.write(
-        f"""
-SHAP analysis is performed using **{best_tree_model_name}**, the best-performing tree-based model in the notebook. 
-This aligns with the assignment requirement to explain predictions using the strongest tree-based model while still allowing users to generate predictions from any of the five saved models.
+        """
+SHAP analysis is performed using **Random Forest**, the best-performing tree-based model in this project. 
+This satisfies the assignment requirement to explain predictions using the strongest tree-based model while still allowing users to generate predictions from any of the five saved classifiers.
 """
     )
 
+    # SHAP plots
     st.subheader(f"SHAP Summary Plot ({best_tree_model_name})")
     plt.figure(figsize=(10, 6))
     shap.summary_plot(shap_values_test, X_test, show=False)
@@ -522,15 +569,15 @@ This aligns with the assignment requirement to explain predictions using the str
 
     st.write(
         """
-The SHAP plots show that **Sex_male, Pclass, Fare, and Age** have the strongest impact on survival predictions. 
+The SHAP plots show that **Sex_male, Pclass, Fare, and Age** have the strongest influence on survival predictions. 
 Being male and belonging to a lower passenger class generally push predictions toward non-survival, while higher fares and more favorable class positions push predictions toward survival.
 """
     )
 
     st.write(
         """
-For decision-makers, these insights are useful because they show that the model is learning meaningful patterns rather than relying on random correlations. 
-This improves trust in the model and makes it easier to explain predicted outcomes to non-technical stakeholders.
+These insights are useful for decision-makers because they show that the model is learning meaningful and interpretable patterns rather than relying on random noise. 
+This increases trust in the model and makes it easier to explain why specific passengers receive higher or lower predicted survival probabilities.
 """
     )
 
@@ -579,12 +626,13 @@ This improves trust in the model and makes it easier to explain predicted outcom
     st.write("**Encoded model input used for prediction:**")
     st.dataframe(user_input, use_container_width=True)
 
+    # custom-input waterfall using best tree-based model
     st.subheader(f"SHAP Waterfall Plot for Custom Input ({best_tree_model_name})")
-    user_shap_values = _standardize_shap_values(explainer.shap_values(user_input))
+    user_shap_values = _to_class1_shap_values(explainer.shap_values(user_input))
 
     user_explanation = shap.Explanation(
         values=user_shap_values[0],
-        base_values=expected_value_scalar,
+        base_values=_scalar_expected_value(explainer.expected_value),
         data=user_input.iloc[0],
         feature_names=user_input.columns.tolist(),
     )
@@ -595,7 +643,7 @@ This improves trust in the model and makes it easier to explain predicted outcom
 
     st.write(
         """
-This waterfall plot explains the prediction for the custom passenger profile entered above. 
-It shows which features increased the predicted survival probability and which features pushed the prediction downward toward non-survival.
+This waterfall plot explains the prediction for the passenger profile entered above. 
+It shows which input features moved the model output upward toward survival and which pushed the prediction downward toward non-survival.
 """
     )
